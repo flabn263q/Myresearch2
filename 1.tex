@@ -1,0 +1,154 @@
+\documentclass[12pt, a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{xeCJK} % 支援繁體中文 (請使用 XeLaTeX 編譯)
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{geometry}
+\usepackage{hyperref}
+
+\geometry{margin=1in}
+\setCJKmainfont{Noto Sans TC} % 請確保系統中有安裝繁體中文字型
+
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\definecolor{backcolour}{rgb}{0.95,0.95,0.92}
+
+\lstset{
+    backgroundcolor=\color{backcolour},   
+    commentstyle=\color{codegreen},
+    keywordstyle=\color{codepurple},
+    numberstyle=\tiny\color{codegray},
+    stringstyle=\color{codegreen},
+    basicstyle=\ttfamily\footnotesize,
+    breaklines=true,                 
+    captionpos=b,                    
+    keepspaces=true,                 
+    numbers=left,                    
+    showspaces=false,                
+    showstringspaces=false,
+    showtabs=false,                  
+    tabsize=2,
+    language=Python
+}
+
+\title{技術筆記：基於競爭失效風險與 PPO 的動態排程優化系統}
+\author{工程學研究筆記 (由 Myakumyaku 整理)}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\section{系統概述 (System Overview)}
+本研究旨在解決動態彈性作業車間排程問題 (DFJSP)，並特別考慮了機器的物理衰退與隨機故障。核心框架結合了離散事件模擬 (DES) 環境與近接方策優化 (PPO) 演算法。
+
+\section{馬可夫決策過程 (MDP) 建模}
+系統被建模為一個五元組 $(\mathcal{S}, \mathcal{A}, P, R, \gamma)$。在程式碼中，環境由 \texttt{DFJSP\_EventEnv} 類別實現。
+
+\subsection{狀態空間 ($\mathcal{S}$)}
+狀態向量包含機器健康特徵與全域生產特徵。
+\begin{itemize}
+    \item \textbf{數學表達}：$s_t = [x_{m1}, \dots, x_{mN}, g_1, g_2, g_3]$
+    \item \textbf{程式對應}：\texttt{exp.py} 中的 \texttt{\_get\_state(self)} 方法。
+    \begin{lstlisting}[language=Python]
+# 機器特徵包含：標準化狀態、可靠度、忙碌狀態、故障歷史
+m_feats.extend([
+    m.state / Config.K_STATES,
+    m.get_reliability(),
+    1.0 if m.status == 1 else 0.0,
+    np.tanh(m.failure_count / 5.0)
+])
+    \end{lstlisting}
+\end{itemize}
+
+\section{物理感知模型 (Physics-informed Model)}
+為了讓 Agent 感知機器的衰退情況，我們引入了韋伯分佈 (Weibull Distribution)。
+
+\subsection{可靠度函數 (Reliability)}
+可靠度 $R(t)$ 定義為機器在時間 $t$ 之前不發生故障的機率：
+\begin{equation}
+R(t) = \exp\left( - \left( \frac{a(t)}{\eta} \right)^\beta \right)
+\end{equation}
+其中 $a(t)$ 是累積機齡，$\eta = 500$ 是尺度參數，$\beta = 1.5$ 是形狀參數。
+\begin{itemize}
+    \item \textbf{程式對應}：\texttt{Machine.get_reliability(self)}。
+    \begin{lstlisting}[language=Python]
+def get_reliability(self):
+    return math.exp(- (self.age_accum / Config.WEIBULL_ETA) ** Config.WEIBULL_BETA)
+    \end{lstlisting}
+\end{itemize}
+
+\subsection{性能衰減與加工速度}
+機器狀態 $S_k$ 會導致加工速度因子 $v(S_k)$ 下降：
+\begin{equation}
+v(S_k) = \max(0.5, 1.0 - S_k \times 0.05)
+\end{equation}
+\begin{itemize}
+    \item \textbf{程式對應}：\texttt{Machine.get_processing_speed_factor(self)}。實際加工時間計算為 \texttt{actual\_time = base\_time / speed\_factor}。
+\end{itemize}
+
+\section{隨機故障與競爭失效 (Competing Risks)}
+除了老化，機器還面臨波松過程 (Poisson Process) 的隨機故障風險。
+
+\subsection{故障機率}
+在加工時間 $t$ 內發生隨機故障的機率為：
+\begin{equation}
+P(\text{Breakdown}) = 1 - e^{-\lambda \cdot t}
+\end{equation}
+\begin{itemize}
+    \item \textbf{程式對應}：\texttt{exp.py} 的 \texttt{step} 方法中模擬故障觸發。
+    \begin{lstlisting}[language=Python]
+breakdown_prob = 1 - math.exp(-Config.RANDOM_BREAKDOWN_RATE * actual_time)
+if random.random() < breakdown_prob:
+    # 觸發 BREAKDOWN 事件
+    \end{lstlisting}
+\end{itemize}
+
+\section{動作遮罩 (Action Masking)}
+為了縮減搜索空間，使用遮罩機制過濾非法動作。
+\begin{itemize}
+    \item \textbf{邏輯}：若機器處於完美狀態或無維修人力，則 PM 動作權重設為 $-\infty$。
+    \item \textbf{程式對應}：\texttt{ActorCritic.act(self, state, mask)}。
+    \begin{lstlisting}[language=Python]
+inf_mask = (1.0 - mask) * -1e9
+masked_logits = logits + inf_mask
+dist = Categorical(logits=masked_logits)
+    \end{lstlisting}
+\end{itemize}
+
+\section{獎勵函數塑形 (Reward Shaping)}
+獎勵函數 $r_t$ 整合了延遲、成本與積壓懲罰：
+\begin{equation}
+r_t = -(w_1 C_{PM} + w_2 C_{CM} + w_3 \text{Tardiness} + w_4 \text{Backlog})
+\end{equation}
+\begin{itemize}
+    \item \textbf{程式對應}：\texttt{exp.py} 中的 \texttt{Config} 權重設定。
+    \begin{lstlisting}[language=Python]
+W_TARDINESS = 1.0
+W_PM_COST = 20.0
+W_CM_COST = 100.0
+W_BACKLOG = 0.5
+    \end{lstlisting}
+\end{itemize}
+
+\section{PPO 優化 (PPO Optimization)}
+PPO 透過裁剪 (Clipping) 策略更新幅度來確保穩定性：
+\begin{equation}
+L^{CLIP}(\theta) = \hat{\mathbb{E}}_t [ \min(r_t(\theta)\hat{A}_t, \text{clip}(r_t(\theta), 1-\epsilon, 1+\epsilon)\hat{A}_t) ]
+\end{equation}
+\begin{itemize}
+    \item \textbf{程式對應}：\texttt{PPO.update(self)} 方法。
+    \begin{lstlisting}[language=Python]
+surr1 = ratios * advantages
+surr2 = torch.clamp(ratios, 1-Config.EPS_CLIP, 1+Config.EPS_CLIP) * advantages
+loss = -torch.min(surr1, surr2) + ...
+    \end{lstlisting}
+\end{itemize}
+
+\section{結論}
+根據實驗數據顯示，所提出的 PPO 框架在平衡維護成本與生產效率上優於 FIFO 與 SPT 等基準規則。這證明了將物理可靠度模型嵌入 DRL 狀態空間的有效性。
+
+\end{document}

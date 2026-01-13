@@ -18,10 +18,8 @@ import os
 class Config:
     # --- Experiment Settings ---
     SEED = 42
-    # [修正] 大幅增加訓練步數以確保收斂
-    TRAIN_TIMESTEPS = 500000  
-    # [修正] 增加 Batch Size 以平滑隨機梯度 (2048 -> 4096)
-    UPDATE_TIMESTEP = 4096    
+    TRAIN_TIMESTEPS = 500000 #[修正] 大幅增加訓練步數以確保收斂
+    UPDATE_TIMESTEP = 4096 #[修正] 增加 Batch Size 以平滑隨機梯度 (2048 -> 4096)
     
     # --- Environment Dimensions ---
     NUM_MACHINES = 5
@@ -46,13 +44,11 @@ class Config:
     TIME_MINIMAL = 20       
     
     # --- PPO Hyperparameters (Conservative) ---
-    # [修正] 降低學習率，避免震盪
-    LR_ACTOR = 1e-4         
+    LR_ACTOR = 1e-4 #[修正] 降低學習率，避免震盪
     LR_CRITIC = 3e-4        
     GAMMA = 0.99
     K_EPOCHS = 10
-    # [修正] 降低 Clip Range，限制更新幅度
-    EPS_CLIP = 0.1          
+    EPS_CLIP = 0.1 #[修正] 降低 Clip Range，限制更新幅度          
     ENTROPY_COEF = 0.01
     
     # --- Reward Weights (Raw) ---
@@ -82,8 +78,7 @@ class Job:
     def is_finished(self):
         return self.current_op_idx >= len(self.ops_times)
     
-    # [修正] 加入比較方法，防止 heapq 報錯
-    def __lt__(self, other):
+    def __lt__(self, other): #[修正] 加入比較方法，防止 heapq 報錯
         return self.id < other.id
 
 class Machine:
